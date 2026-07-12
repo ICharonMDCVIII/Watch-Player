@@ -1,0 +1,13 @@
+{
+  "_comment": "Colle ici le resultat de /l player <pseudo> pour tes cibles. Le bot calcule la date de chute exacte et te ping 24h avant. Supprime les 2 exemples.",
+  "Crack_Fit": {
+    "last_online": "2026-02-17",
+    "playtime_hours": 1373,
+    "note": "14 lands, 5x2000 chunks sur mojave. Palier 1 an -> chute le 17/02/2027."
+  },
+  "ExemplePetitJoueur": {
+    "last_online": "2026-06-20",
+    "playtime_hours": 4,
+    "note": "4h de jeu -> palier 30j -> tombe le 20/07/2026."
+  }
+}
