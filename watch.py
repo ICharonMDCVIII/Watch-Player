@@ -2,10 +2,14 @@
 """
 Badlands Watch
 Surveille les lands du serveur Badlands via BlueMap et previent sur Discord
-quand un land est declaim (supprime pour inactivite).
+quand un land est declaim ou retrecit.
 
 Aucune connexion au serveur Minecraft : on lit uniquement les pages web
 publiques de la BlueMap, exactement comme un visiteur avec son navigateur.
+
+Le script tourne EN BOUCLE pendant LOOP_MINUTES et releve les joueurs toutes
+les POLL_SECONDS. Le cron GitHub etant peu fiable (des heures de trou entre
+deux runs), c'est la boucle qui assure la couverture, pas le cron.
 """
 
 import json, os, re, html, time, math, urllib.request, urllib.error
@@ -21,6 +25,9 @@ HOME_WORLD, HOME_X, HOME_Z = "mojave", 423, -7027          # ta base
 MARKERS_EVERY = 3600          # secondes entre 2 scans des lands (1h)
 NEW_LAND_ALERTS = False       # True = te prevenir aussi des lands crees
 
+LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "0"))    # 0 = un seul passage
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "120"))
+
 STATE     = Path("data/state.json")
 WATCHLIST = Path("data/watchlist.json")
 WEBHOOK   = os.environ.get("DISCORD_WEBHOOK", "").strip()
@@ -29,7 +36,6 @@ WEBHOOK   = os.environ.get("DISCORD_WEBHOOK", "").strip()
 TIERS = [(1, 15), (6, 30), (24, 90), (48, 180), (float("inf"), 365)]
 
 UA = {"User-Agent": "Mozilla/5.0 (badlands-watch)"}
-now = datetime.now(timezone.utc)
 
 
 # ------------------------------------------------------------------ OUTILS
@@ -43,7 +49,7 @@ def get(world, kind):
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:
             if essai == 2:
-                print(f"  !! {world}/{kind} injoignable : {e}")
+                print(f"  !! {world}/{kind} injoignable : {e}", flush=True)
                 return None
             time.sleep(3)
 
@@ -73,14 +79,13 @@ def parse_land(detail):
 
 
 def tier_days(heures):
-    """Palier de suppression en jours, selon les heures de jeu."""
     for seuil, jours in TIERS:
         if heures < seuil:
             return jours
     return 365
 
 
-def jours_depuis(iso):
+def jours_depuis(iso, now):
     if not iso:
         return None
     return (now - datetime.fromisoformat(iso)).total_seconds() / 86400
@@ -93,38 +98,35 @@ def dist(land):
     return round(math.hypot(land.get("x", 0) - HOME_X, land.get("z", 0) - HOME_Z))
 
 
-def verdict(land, players):
-    """Deduit le palier du proprio au moment de la chute -> ca vaut le coup ou pas."""
+def verdict(land, players, debut, now):
+    """Deduit le palier des membres au moment de la chute : ca vaut le coup ou pas."""
     membres = land.get("players") or ([land["owner"]] if land.get("owner") else [])
-    vus = [jours_depuis(players.get(p, {}).get("last_seen")) for p in membres]
+    vus = [jours_depuis(players.get(p, {}).get("last_seen"), now) for p in membres]
     vus = [v for v in vus if v is not None]
 
-    # signes exterieurs de richesse : un debutant n'a ni 5 lands ni 500k en banque
-    riche = land.get("owner_lands", 0) >= 5 or land.get("balance", 0) >= 500_000
+    riche = land.get("owner_lands", 0) >= 5 or land.get("balance", 0) >= 500000
 
     if not vus:
-        age = jours_depuis(STATE_START) or 0
+        age = jours_depuis(debut, now) or 0
         if age < 20:
-            return f"proprio jamais vu (bot lance depuis {age:.0f}j seulement, trop tot pour trancher)", "?"
+            return f"aucun membre vu, mais le bot ne tourne que depuis {age:.0f}j : trop tot pour trancher"
         if age >= 90:
-            return (f"proprio jamais vu en {age:.0f}j de surveillance -> palier long "
-                    f"(180j ou 1 an) -> **gros joueur, fonce**"), "+++"
-        return f"proprio jamais vu en {age:.0f}j -> palier >= {age:.0f}j, a creuser", "+"
+            return (f"aucun membre vu en {age:.0f}j de surveillance -> palier long "
+                    f"(180j ou 1 an) -> **gros joueurs, fonce**")
+        return f"aucun membre vu en {age:.0f}j -> palier >= {age:.0f}j, a creuser"
 
-    d = min(vus)  # le membre le plus recemment actif
-
+    d = min(vus)
     if d <= 45 and riche:
-        return (f"dernier membre actif il y a seulement {d:.0f}j, mais ce proprio a "
-                f"{land.get('owner_lands', '?')} land(s) et {land.get('balance', 0):,.0f} en banque. "
-                f"Un debutant tombe pas si vite avec ce profil : c'est probablement une "
-                f"**suppression volontaire**, pas un declaim. La base est libre quand meme."), "+"
+        return (f"dernier membre actif il y a seulement {d:.0f}j, mais ce land a "
+                f"{land.get('balance', 0):,.0f} en banque : un debutant tient pas ce profil. "
+                f"C'est sans doute une **suppression volontaire**. La base est libre quand meme.")
     if d <= 45:
-        return f"dernier membre actif il y a {d:.0f}j -> palier 15 ou 30j -> **petit joueur, laisse tomber**", "--"
+        return f"dernier membre actif il y a {d:.0f}j -> palier 15 ou 30j -> **petit joueur, laisse tomber**"
     if d <= 120:
-        return f"dernier membre actif il y a {d:.0f}j -> palier ~90j -> joueur moyen (6-24h de jeu)", "+"
+        return f"dernier membre actif il y a {d:.0f}j -> palier ~90j -> joueur moyen (6-24h de jeu)"
     if d <= 240:
-        return f"dernier membre actif il y a {d:.0f}j -> palier ~180j -> **bon joueur (24-48h de jeu)**", "++"
-    return f"dernier membre actif il y a {d:.0f}j -> palier 1 an -> **gros joueur, fonce**", "+++"
+        return f"dernier membre actif il y a {d:.0f}j -> palier ~180j -> **bon joueur (24-48h de jeu)**"
+    return f"dernier membre actif il y a {d:.0f}j -> palier 1 an -> **gros joueur, fonce**"
 
 
 def esc(s):
@@ -134,9 +136,8 @@ def esc(s):
 def envoyer(embeds):
     """Envoie les embeds sur Discord, par paquets de 10."""
     if not WEBHOOK:
-        print("  (pas de webhook, rien envoye)")
         for e in embeds:
-            print("  --", e["title"])
+            print("  [pas de webhook] " + e["title"], flush=True)
         return
     for i in range(0, len(embeds), 10):
         data = json.dumps({"embeds": embeds[i:i + 10]}).encode()
@@ -146,160 +147,204 @@ def envoyer(embeds):
         try:
             urllib.request.urlopen(req, timeout=20)
         except urllib.error.HTTPError as e:
-            print("  !! Discord :", e.code, e.read()[:200])
+            print("  !! Discord :", e.code, e.read()[:200], flush=True)
         time.sleep(1)
 
 
-# ------------------------------------------------------------------ ETAT
-state = json.loads(STATE.read_text()) if STATE.exists() else \
-    {"version": 1, "last_markers": 0, "lands": {}, "players": {}, "started": now.isoformat()}
-state.setdefault("started", now.isoformat())
-state.setdefault("pinged", [])
-STATE_START = state["started"]
+# ------------------------------------------------------------------ CYCLE
+def cycle(state):
+    """Un passage complet : qui est en ligne, les lands ont-ils bouge, alertes."""
+    now = datetime.now(timezone.utc)
+    players   = state["players"]
+    lands_old = state["lands"]
+    debut     = state["started"]
+    alertes   = []
 
-lands_old = state["lands"]
-players   = state["players"]
-alertes   = []
-
-# ------------------------------------------------------- 1. QUI EST EN LIGNE
-en_ligne = {}
-for w in WORLDS_PLAYERS:
-    d = get(w, "players")
-    if not d:
-        continue
-    for p in d.get("players", []):
-        if p.get("foreign"):
-            continue
-        pos = p.get("position", {})
-        en_ligne[p["name"]] = {"world": w,
-                               "x": round(pos.get("x", 0)),
-                               "z": round(pos.get("z", 0))}
-
-for nom, info in en_ligne.items():
-    fiche = players.setdefault(nom, {"first_seen": now.isoformat(), "sessions": 0})
-    fiche["last_seen"]  = now.isoformat()
-    fiche["last_world"] = info["world"]
-    fiche["last_pos"]   = [info["x"], info["z"]]
-    fiche["sessions"]   = fiche.get("sessions", 0) + 1
-
-print(f"{now:%d/%m %H:%M} | {len(en_ligne)} en ligne | {len(players)} joueurs connus")
-
-# --------------------------------------- 2. WATCHLIST : chute prevue a J-1 ?
-if WATCHLIST.exists():
-    for nom, info in json.loads(WATCHLIST.read_text()).items():
-        try:
-            derniere = datetime.fromisoformat(info["last_online"]).replace(tzinfo=timezone.utc)
-        except Exception:
-            continue
-        # une reconnexion observee ecrase la date saisie a la main
-        vu = players.get(nom, {}).get("last_seen")
-        if vu and datetime.fromisoformat(vu) > derniere:
-            derniere = datetime.fromisoformat(vu)
-
-        palier = tier_days(info.get("playtime_hours", 0))
-        chute  = derniere + timedelta(days=palier)
-        reste  = (chute - now).total_seconds() / 86400
-        cle    = f"{nom}:{chute:%Y-%m-%d}"
-
-        if nom in en_ligne and cle in state["pinged"]:
-            state["pinged"].remove(cle)   # il est revenu, le timer repart
-            alertes.append({
-                "title": f"↩️ {esc(nom)} s'est reconnecte",
-                "description": f"Son timer repart a zero. Nouvelle chute estimee le "
-                               f"**{(now + timedelta(days=palier)):%d/%m/%Y}** "
-                               f"(palier {palier}j). Pense a refaire `/l player {nom}`.",
-                "color": 0x8899AA})
-        elif 0 < reste <= 1 and cle not in state["pinged"]:
-            state["pinged"].append(cle)
-            terrains = [l for l in lands_old.values()
-                        if l.get("owner") == nom or nom in (l.get("players") or [])]
-            liste = "\n".join(
-                f"• **{esc(l['name'])}** ({l['world']}) — {l['chunks']} chunks, "
-                f"`{l['x']} / {l['z']}`" + (f" — {dist(l)} blocs de chez toi" if dist(l) else "")
-                for l in sorted(terrains, key=lambda x: -x["chunks"])[:8]) or "aucun land connu"
-            alertes.append({
-                "title": f"⏰ {esc(nom)} : ses lands tombent dans moins de 24h",
-                "description": f"Chute prevue le **{chute:%d/%m/%Y}** "
-                               f"(inactif depuis {jours_depuis(derniere.isoformat()):.0f}j, palier {palier}j)\n\n{liste}",
-                "color": 0xE67E22})
-
-# ------------------------------------------------- 3. LES LANDS ONT BOUGE ?
-scan = time.time() - state.get("last_markers", 0) > MARKERS_EVERY
-if scan:
-    lands_new, ok = {}, True
-    for w in WORLDS_LANDS:
-        d = get(w, "markers")
+    # --- 1. qui est en ligne
+    en_ligne = {}
+    for w in WORLDS_PLAYERS:
+        d = get(w, "players")
         if not d:
-            ok = False
-            break
-        for cle, m in (d.get("me.angeschossen.lands", {}).get("markers", {})).items():
-            lid = cle.split("_")[0]
-            if lid in lands_new:
-                lands_new[lid]["zones"] += 1
+            continue
+        for p in d.get("players", []):
+            if p.get("foreign"):
                 continue
-            info = parse_land(m["detail"])
-            pos = m.get("position", {})
-            info.update(world=w, x=round(pos.get("x", 0)), z=round(pos.get("z", 0)), zones=1)
-            lands_new[lid] = info
+            pos = p.get("position", {})
+            en_ligne[p["name"]] = {"world": w, "x": round(pos.get("x", 0)),
+                                   "z": round(pos.get("z", 0))}
 
-    # nb de lands par proprio = proxy du grade (grade eleve = gros joueur = palier long)
-    compte = {}
-    for l in lands_new.values():
-        if l.get("owner"):
-            compte[l["owner"]] = compte.get(l["owner"], 0) + 1
-    for l in lands_new.values():
-        l["owner_lands"] = compte.get(l.get("owner"), 0)
+    for nom, info in en_ligne.items():
+        f = players.setdefault(nom, {"first_seen": now.isoformat(), "sessions": 0})
+        f["last_seen"]  = now.isoformat()
+        f["last_world"] = info["world"]
+        f["last_pos"]   = [info["x"], info["z"]]
+        f["sessions"]   = f.get("sessions", 0) + 1
 
-    # un monde HS = on ne touche a rien, sinon on croit que tout a disparu
-    if ok and lands_new:
-        state["last_markers"] = time.time()
-        tombes  = [lands_old[i] for i in lands_old if i not in lands_new]
-        nouveaux = [lands_new[i] for i in lands_new if i not in lands_old]
+    print(f"{now:%d/%m %H:%M} | {len(en_ligne):>3} en ligne | "
+          f"{len(players):>4} joueurs connus", flush=True)
 
-        if len(tombes) > 200:
-            print(f"  !! {len(tombes)} disparitions d'un coup : bug probable, on ignore")
-            tombes = []
+    # --- 2. watchlist : chute prevue dans moins de 24h ?
+    if WATCHLIST.exists():
+        try:
+            wl = json.loads(WATCHLIST.read_text())
+        except Exception:
+            wl = {}
+        for nom, info in wl.items():
+            if nom.startswith("_") or not isinstance(info, dict):
+                continue
+            try:
+                derniere = datetime.fromisoformat(info["last_online"]).replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            vu = players.get(nom, {}).get("last_seen")
+            if vu and datetime.fromisoformat(vu) > derniere:
+                derniere = datetime.fromisoformat(vu)
 
-        for l in sorted(tombes, key=lambda x: -x["chunks"]):
-            txt, note = verdict(l, players)
-            d = dist(l)
-            couleur = {"+++": 0x2ECC71, "++": 0x2ECC71, "+": 0xF1C40F}.get(note, 0x95A5A6)
-            alertes.append({
-                "title": f"💥 LAND TOMBE : {esc(l['name'])}",
-                "description": (
-                    f"**{esc(l.get('owner') or '?')}** — {l['chunks']} chunks — {l.get('level') or '?'}\n"
-                    f"Monde **{l['world']}** — `{l['x']} / {l['z']}`"
-                    + (f" — **{d} blocs** de chez toi\n" if d else "\n")
-                    + (f"Membres : {esc(', '.join(l['players'][:6]))}\n" if l.get("players") else "")
-                    + (f"Solde du land : {l['balance']:,.0f}\n" if l.get("balance") else "")
-                    + f"\n{txt}"),
-                "color": couleur})
+            palier = tier_days(info.get("playtime_hours", 0))
+            chute  = derniere + timedelta(days=palier)
+            reste  = (chute - now).total_seconds() / 86400
+            cle    = f"{nom}:{chute:%Y-%m-%d}"
 
-        if NEW_LAND_ALERTS:
-            for l in nouveaux[:5]:
+            if nom in en_ligne and cle in state["pinged"]:
+                state["pinged"].remove(cle)
                 alertes.append({
-                    "title": f"🆕 Nouveau land : {esc(l['name'])}",
-                    "description": f"{esc(l.get('owner') or '?')} — {l['world']} `{l['x']}/{l['z']}`",
-                    "color": 0x3498DB})
-
-        # retrecissement = le proprio unclaim, souvent juste avant de partir
-        for lid, ln in lands_new.items():
-            lo = lands_old.get(lid)
-            if lo and ln["chunks"] < lo["chunks"] * 0.6 and lo["chunks"] >= 20:
+                    "title": f"[RETOUR] {esc(nom)} s'est reconnecte",
+                    "description": f"Son timer repart a zero. Nouvelle chute vers le "
+                                   f"**{(now + timedelta(days=palier)):%d/%m/%Y}**. "
+                                   f"Pense a refaire `/l player {nom}`.",
+                    "color": 0x8899AA})
+            elif 0 < reste <= 1 and cle not in state["pinged"]:
+                state["pinged"].append(cle)
+                terrains = [l for l in lands_old.values()
+                            if nom in (l.get("players") or []) or l.get("owner") == nom]
+                liste = "\n".join(
+                    f"- **{esc(l['name'])}** ({l['world']}) - {l['chunks']} chunks, "
+                    f"`{l['x']} / {l['z']}`" + (f" - {dist(l)} blocs" if dist(l) else "")
+                    for l in sorted(terrains, key=lambda x: -x["chunks"])[:8]) or "aucun land connu"
                 alertes.append({
-                    "title": f"📉 {esc(ln['name'])} retrecit",
-                    "description": f"{lo['chunks']} → **{ln['chunks']}** chunks. "
-                                   f"{esc(ln.get('owner') or '?')} est peut-etre en train de plier bagage.\n"
-                                   f"{ln['world']} `{ln['x']}/{ln['z']}`",
-                    "color": 0x9B59B6})
+                    "title": f"[J-1] {esc(nom)} : ca tombe dans moins de 24h",
+                    "description": f"Chute prevue le **{chute:%d/%m/%Y}** "
+                                   f"(palier {palier}j)\n\n{liste}",
+                    "color": 0xE67E22})
 
-        state["lands"] = lands_new
-        print(f"  lands : {len(lands_new)} | {len(tombes)} tombes | {len(nouveaux)} nouveaux")
+    # --- 3. les lands ont-ils bouge ?
+    if time.time() - state.get("last_markers", 0) > MARKERS_EVERY:
+        lands_new, ok = {}, True
+        for w in WORLDS_LANDS:
+            d = get(w, "markers")
+            if not d:
+                ok = False
+                break
+            for cle, m in (d.get("me.angeschossen.lands", {}).get("markers", {})).items():
+                lid = cle.split("_")[0]
+                if lid in lands_new:
+                    lands_new[lid]["zones"] += 1
+                    continue
+                info = parse_land(m["detail"])
+                pos = m.get("position", {})
+                info.update(world=w, x=round(pos.get("x", 0)),
+                            z=round(pos.get("z", 0)), zones=1)
+                lands_new[lid] = info
 
-# ------------------------------------------------------------------ ENVOI
-if alertes:
-    print(f"  -> {len(alertes)} alerte(s)")
-    envoyer(alertes)
+        if ok and lands_new:
+            compte = {}
+            for l in lands_new.values():
+                if l.get("owner"):
+                    compte[l["owner"]] = compte.get(l["owner"], 0) + 1
+            for l in lands_new.values():
+                l["owner_lands"] = compte.get(l.get("owner"), 0)
 
-STATE.parent.mkdir(exist_ok=True)
-STATE.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+            state["last_markers"] = time.time()
+            tombes   = [lands_old[i] for i in lands_old if i not in lands_new]
+            nouveaux = [lands_new[i] for i in lands_new if i not in lands_old]
+
+            if len(tombes) > 200:
+                print(f"  !! {len(tombes)} disparitions d'un coup : anormal, on ignore", flush=True)
+                tombes = []
+
+            for l in sorted(tombes, key=lambda x: -x["chunks"]):
+                d = dist(l)
+                alertes.append({
+                    "title": f"[LAND TOMBE] {esc(l['name'])}",
+                    "description": (
+                        f"**{esc(l.get('owner') or 'proprio inconnu')}** - {l['chunks']} chunks"
+                        f" - {l.get('level') or '?'}\n"
+                        f"Monde **{l['world']}** - `{l['x']} / {l['z']}`"
+                        + (f" - **{d} blocs** de chez toi\n" if d else "\n")
+                        + (f"Membres : {esc(', '.join(l['players'][:6]))}\n" if l.get("players") else "")
+                        + (f"Solde : {l['balance']:,.0f}\n" if l.get("balance") else "")
+                        + f"\n{verdict(l, players, debut, now)}"),
+                    "color": 0x2ECC71})
+
+            if NEW_LAND_ALERTS:
+                for l in nouveaux[:5]:
+                    alertes.append({
+                        "title": f"[NOUVEAU] {esc(l['name'])}",
+                        "description": f"{esc(l.get('owner') or '?')} - {l['world']} "
+                                       f"`{l['x']}/{l['z']}`",
+                        "color": 0x3498DB})
+
+            # retrecissement : des membres ont ete purges, du terrain se libere
+            for lid, ln in lands_new.items():
+                lo = lands_old.get(lid)
+                if lo and ln["chunks"] < lo["chunks"] * 0.6 and lo["chunks"] >= 20:
+                    perdu = lo["chunks"] - ln["chunks"]
+                    reste_txt = ("**il ne reste que le chunk du coeur** : la base est encore "
+                                 "protegee par le dernier membre vivant. Tape `/l player` sur "
+                                 "les membres restants pour savoir quand il tombe."
+                                 if ln["chunks"] <= 2 else
+                                 f"{ln['chunks']} chunks encore proteges.")
+                    alertes.append({
+                        "title": f"[FOND] {esc(ln['name'])} : -{perdu} chunks",
+                        "description": (
+                            f"{lo['chunks']} -> **{ln['chunks']}** chunks. Des membres viennent "
+                            f"d'etre purges pour inactivite : **{perdu} chunks deprotegés**.\n"
+                            f"{esc(ln.get('owner') or '?')} - {ln['world']} `{ln['x']}/{ln['z']}`"
+                            + (f" - {dist(ln)} blocs de chez toi" if dist(ln) else "") + "\n"
+                            + (f"Membres restants : {esc(', '.join(ln['players'][:6]))}\n"
+                               if ln.get("players") else "")
+                            + f"\n{reste_txt}"),
+                        "color": 0x9B59B6})
+
+            state["lands"] = lands_new
+            print(f"  lands : {len(lands_new)} | {len(tombes)} tombes | "
+                  f"{len(nouveaux)} nouveaux", flush=True)
+
+    if alertes:
+        print(f"  -> {len(alertes)} alerte(s) envoyee(s)", flush=True)
+        envoyer(alertes)
+
+
+# ------------------------------------------------------------------ MAIN
+def main():
+    now = datetime.now(timezone.utc)
+    state = json.loads(STATE.read_text()) if STATE.exists() else \
+        {"version": 1, "last_markers": 0, "lands": {}, "players": {}}
+    state.setdefault("started", now.isoformat())
+    state.setdefault("pinged", [])
+    state.setdefault("players", {})
+    state.setdefault("lands", {})
+
+    fin   = time.time() + LOOP_MINUTES * 60
+    tours = 0
+
+    while True:
+        tours += 1
+        try:
+            cycle(state)
+        except Exception as e:
+            print(f"  !! erreur dans le cycle : {e}", flush=True)
+
+        # on sauve a chaque tour : si le run est coupe, rien n'est perdu
+        STATE.parent.mkdir(exist_ok=True)
+        STATE.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+
+        if time.time() + POLL_SECONDS >= fin:
+            break
+        time.sleep(POLL_SECONDS)
+
+    print(f"\n{tours} releve(s) sur ce run.", flush=True)
+
+
+if __name__ == "__main__":
+    main()
