@@ -15,7 +15,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +26,7 @@ jobs:
       - name: Surveiller en boucle
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          LOOP_MINUTES: "50"
+          LOOP_MINUTES: "330"
           POLL_SECONDS: "120"
         run: python watch.py
 
