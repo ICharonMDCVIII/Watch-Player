@@ -15,6 +15,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -22,12 +23,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Surveiller
+      - name: Surveiller en boucle
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          LOOP_MINUTES: "50"
+          POLL_SECONDS: "120"
         run: python watch.py
 
       - name: Sauvegarder l'etat
+        if: always()
         run: |
           git config user.name  "badlands-watch"
           git config user.email "bot@users.noreply.github.com"
