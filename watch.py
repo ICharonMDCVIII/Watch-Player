@@ -12,7 +12,7 @@ les POLL_SECONDS. Le cron GitHub etant peu fiable (des heures de trou entre
 deux runs), c'est la boucle qui assure la couverture, pas le cron.
 """
 
-import json, os, re, html, time, math, urllib.request, urllib.error
+import json, os, re, html, time, math, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -99,7 +99,7 @@ def dist(land):
 
 
 def verdict(land, players, debut, now):
-    """Deduit le palier des membres au moment de la chute : ca vaut le coup ou pas."""
+    """Renvoie (note, phrase). La note pilote la couleur et la pastille."""
     membres = land.get("players") or ([land["owner"]] if land.get("owner") else [])
     vus = [jours_depuis(players.get(p, {}).get("last_seen"), now) for p in membres]
     vus = [v for v in vus if v is not None]
@@ -109,24 +109,58 @@ def verdict(land, players, debut, now):
     if not vus:
         age = jours_depuis(debut, now) or 0
         if age < 20:
-            return f"aucun membre vu, mais le bot ne tourne que depuis {age:.0f}j : trop tot pour trancher"
+            return "?", (f"Aucun membre croisé, mais je ne surveille que depuis {age:.0f} jour(s). "
+                         f"Trop tôt pour juger.")
         if age >= 90:
-            return (f"aucun membre vu en {age:.0f}j de surveillance -> palier long "
-                    f"(180j ou 1 an) -> **gros joueurs, fonce**")
-        return f"aucun membre vu en {age:.0f}j -> palier >= {age:.0f}j, a creuser"
+            return "+++", (f"Aucun membre croisé en {age:.0f} jours de surveillance. "
+                           f"Palier long (180 j ou 1 an) → des joueurs installés.")
+        return "+", f"Aucun membre croisé en {age:.0f} jours. Palier d'au moins {age:.0f} jours."
 
     d = min(vus)
     if d <= 45 and riche:
-        return (f"dernier membre actif il y a seulement {d:.0f}j, mais ce land a "
-                f"{land.get('balance', 0):,.0f} en banque : un debutant tient pas ce profil. "
-                f"C'est sans doute une **suppression volontaire**. La base est libre quand meme.")
+        return "+", (f"Dernier membre actif il y a {d:.0f} jours seulement, mais ce land a "
+                     f"{nb(land.get('balance', 0))} en banque : pas un profil de débutant. "
+                     f"Sans doute une suppression volontaire.")
     if d <= 45:
-        return f"dernier membre actif il y a {d:.0f}j -> palier 15 ou 30j -> **petit joueur, laisse tomber**"
+        return "--", (f"Dernier membre actif il y a {d:.0f} jours → palier 15 ou 30 jours "
+                      f"→ moins de 6 h de jeu.")
     if d <= 120:
-        return f"dernier membre actif il y a {d:.0f}j -> palier ~90j -> joueur moyen (6-24h de jeu)"
+        return "+", f"Dernier membre actif il y a {d:.0f} jours → palier 90 jours → 6 à 24 h de jeu."
     if d <= 240:
-        return f"dernier membre actif il y a {d:.0f}j -> palier ~180j -> **bon joueur (24-48h de jeu)**"
-    return f"dernier membre actif il y a {d:.0f}j -> palier 1 an -> **gros joueur, fonce**"
+        return "++", f"Dernier membre actif il y a {d:.0f} jours → palier 180 jours → 24 à 48 h de jeu."
+    return "+++", f"Dernier membre actif il y a {d:.0f} jours → palier 1 an → gros joueur."
+
+
+NOTES = {
+    "+++": ("\U0001F7E2", 0x2ECC71, "Fonce"),
+    "++":  ("\U0001F7E2", 0x27AE60, "Ça vaut le coup"),
+    "+":   ("\U0001F7E1", 0xF39C12, "À voir"),
+    "--":  ("\u26AA", 0x95A5A6, "Petit joueur"),
+    "?":   ("\u2754", 0x7F8C8D, "Trop tôt pour dire"),
+}
+
+
+def nb(n):
+    """1234 -> '1 234'"""
+    return f"{int(n):,}".replace(",", "\u202f")
+
+
+def tete(pseudo):
+    """La tete du skin, via Minotar. Steve par defaut si le pseudo est inconnu."""
+    if not pseudo:
+        return None
+    return "https://minotar.net/helm/" + urllib.parse.quote(str(pseudo)) + "/64.png"
+
+
+def carte(land):
+    """Lien direct vers l'endroit sur la BlueMap."""
+    w = land.get("world")
+    return (f"https://{w}.badlands.fr/#{w}:{land.get('x', 0)}:0:{land.get('z', 0)}"
+            f":300:0:0:0:0:perspective")
+
+
+def champ(nom, valeur, inline=True):
+    return {"name": nom, "value": valeur or "\u2014", "inline": inline}
 
 
 def esc(s):
@@ -207,25 +241,44 @@ def cycle(state):
 
             if nom in en_ligne and cle in state["pinged"]:
                 state["pinged"].remove(cle)
-                alertes.append({
-                    "title": f"[RETOUR] {esc(nom)} s'est reconnecte",
-                    "description": f"Son timer repart a zero. Nouvelle chute vers le "
-                                   f"**{(now + timedelta(days=palier)):%d/%m/%Y}**. "
-                                   f"Pense a refaire `/l player {nom}`.",
-                    "color": 0x8899AA})
+                e = {
+                    "title": f"\u21A9\uFE0F  {esc(nom)} est revenu",
+                    "description": (f"Son compteur repart de zéro. Prochaine échéance vers le "
+                                    f"**{(now + timedelta(days=palier)):%d/%m/%Y}** "
+                                    f"(palier {palier} jours).\n"
+                                    f"Refais un `/l player {nom}` pour la date exacte."),
+                    "color": 0x7F8C8D,
+                    "timestamp": now.isoformat(),
+                    "footer": {"text": "\u26AA Ce land ne tombera pas"},
+                }
+                if nom:
+                    e["thumbnail"] = {"url": tete(nom)}
+                alertes.append(e)
             elif 0 < reste <= 1 and cle not in state["pinged"]:
                 state["pinged"].append(cle)
                 terrains = [l for l in lands_old.values()
                             if nom in (l.get("players") or []) or l.get("owner") == nom]
-                liste = "\n".join(
-                    f"- **{esc(l['name'])}** ({l['world']}) - {l['chunks']} chunks, "
-                    f"`{l['x']} / {l['z']}`" + (f" - {dist(l)} blocs" if dist(l) else "")
-                    for l in sorted(terrains, key=lambda x: -x["chunks"])[:8]) or "aucun land connu"
-                alertes.append({
-                    "title": f"[J-1] {esc(nom)} : ca tombe dans moins de 24h",
-                    "description": f"Chute prevue le **{chute:%d/%m/%Y}** "
-                                   f"(palier {palier}j)\n\n{liste}",
-                    "color": 0xE67E22})
+                terrains.sort(key=lambda x: -x["chunks"])
+                e = {
+                    "title": f"\u23F0  {esc(nom)} : ça tombe dans moins de 24 h",
+                    "description": (f"Chute prévue le **{chute:%d/%m/%Y}** \u00b7 "
+                                    f"palier {palier} jours."),
+                    "color": 0xE67E22,
+                    "fields": [],
+                    "timestamp": now.isoformat(),
+                    "footer": {"text": "\U0001F7E2 Sois sur place"},
+                    "thumbnail": {"url": tete(nom)},
+                }
+                for l in terrains[:6]:
+                    d = dist(l)
+                    e["fields"].append(champ(
+                        f"{l['name']} \u00b7 {nb(l['chunks'])} chunks",
+                        f"{l['world'].capitalize()} \u00b7 `{l['x']} / {l['z']}`"
+                        + (f" \u00b7 {nb(d)} blocs" if d else "")
+                        + f"\n[Voir sur la carte]({carte(l)})", False))
+                if not terrains:
+                    e["fields"].append(champ("Lands", "aucun land connu à son nom", False))
+                alertes.append(e)
 
     # --- 3. les lands ont-ils bouge ?
     if time.time() - state.get("last_markers", 0) > MARKERS_EVERY:
@@ -263,48 +316,86 @@ def cycle(state):
                 tombes = []
 
             for l in sorted(tombes, key=lambda x: -x["chunks"]):
+                note, phrase = verdict(l, players, debut, now)
+                pastille, couleur, etiquette = NOTES[note]
                 d = dist(l)
-                alertes.append({
-                    "title": f"[LAND TOMBE] {esc(l['name'])}",
-                    "description": (
-                        f"**{esc(l.get('owner') or 'proprio inconnu')}** - {l['chunks']} chunks"
-                        f" - {l.get('level') or '?'}\n"
-                        f"Monde **{l['world']}** - `{l['x']} / {l['z']}`"
-                        + (f" - **{d} blocs** de chez toi\n" if d else "\n")
-                        + (f"Membres : {esc(', '.join(l['players'][:6]))}\n" if l.get("players") else "")
-                        + (f"Solde : {l['balance']:,.0f}\n" if l.get("balance") else "")
-                        + f"\n{verdict(l, players, debut, now)}"),
-                    "color": 0x2ECC71})
+                membres = l.get("players") or []
+                e = {
+                    "title": f"\U0001F4A5  {l['name']} est tombé",
+                    "description": f"**{nb(l['chunks'])} chunks** \u00b7 {l.get('level') or '?'}"
+                                   f"\n[Voir sur la carte]({carte(l)})",
+                    "color": couleur,
+                    "fields": [
+                        champ("Propriétaire", esc(l.get("owner") or "inconnu")),
+                        champ("Monde", l["world"].capitalize()),
+                        champ("Distance", f"{nb(d)} blocs" if d else "autre monde"),
+                        champ("Coordonnées", f"`{l['x']} / {l['z']}`", False),
+                    ],
+                    "timestamp": now.isoformat(),
+                    "footer": {"text": f"{pastille} {etiquette}"},
+                }
+                if l.get("owner"):
+                    e["thumbnail"] = {"url": tete(l["owner"])}
+                if len(membres) > 1:
+                    liste = ", ".join(esc(m) for m in membres[:5])
+                    if len(membres) > 5:
+                        liste += f" +{len(membres) - 5}"
+                    e["fields"].append(champ(f"Membres ({len(membres)})", liste, False))
+                if l.get("balance"):
+                    e["fields"].append(champ("Banque du land", nb(l["balance"])))
+                e["fields"].append(champ("Verdict", phrase, False))
+                alertes.append(e)
 
             if NEW_LAND_ALERTS:
                 for l in nouveaux[:5]:
                     alertes.append({
-                        "title": f"[NOUVEAU] {esc(l['name'])}",
-                        "description": f"{esc(l.get('owner') or '?')} - {l['world']} "
-                                       f"`{l['x']}/{l['z']}`",
-                        "color": 0x3498DB})
+                        "title": f"\U0001F195  {l['name']}",
+                        "description": f"Nouveau land \u00b7 [Voir sur la carte]({carte(l)})",
+                        "color": 0x3498DB,
+                        "fields": [
+                            champ("Propriétaire", esc(l.get("owner") or "?")),
+                            champ("Monde", l["world"].capitalize()),
+                            champ("Coordonnées", f"`{l['x']} / {l['z']}`"),
+                        ],
+                        "timestamp": now.isoformat(),
+                    })
 
-            # retrecissement : des membres ont ete purges, du terrain se libere
+            # retrecissement : le plugin rase les chunks vides, garde le bati
             for lid, ln in lands_new.items():
                 lo = lands_old.get(lid)
                 if lo and ln["chunks"] < lo["chunks"] * 0.6 and lo["chunks"] >= 20:
                     perdu = lo["chunks"] - ln["chunks"]
-                    reste_txt = ("**il ne reste que le chunk du coeur** : la base est encore "
-                                 "protegee par le dernier membre vivant. Tape `/l player` sur "
-                                 "les membres restants pour savoir quand il tombe."
-                                 if ln["chunks"] <= 2 else
-                                 f"{ln['chunks']} chunks encore proteges.")
-                    alertes.append({
-                        "title": f"[FOND] {esc(ln['name'])} : -{perdu} chunks",
-                        "description": (
-                            f"{lo['chunks']} -> **{ln['chunks']}** chunks. Des membres viennent "
-                            f"d'etre purges pour inactivite : **{perdu} chunks deprotegés**.\n"
-                            f"{esc(ln.get('owner') or '?')} - {ln['world']} `{ln['x']}/{ln['z']}`"
-                            + (f" - {dist(ln)} blocs de chez toi" if dist(ln) else "") + "\n"
-                            + (f"Membres restants : {esc(', '.join(ln['players'][:6]))}\n"
-                               if ln.get("players") else "")
-                            + f"\n{reste_txt}"),
-                        "color": 0x9B59B6})
+                    d = dist(ln)
+                    membres = ln.get("players") or []
+                    gros = ln["chunks"] >= 30
+                    e = {
+                        "title": f"\U0001F4C9  {ln['name']} a été rasé",
+                        "description": (f"**{nb(lo['chunks'])} \u2192 {nb(ln['chunks'])} chunks** "
+                                        f"(\u2212{nb(perdu)})\n"
+                                        f"Le terrain nu a sauté, il ne reste que le bâti."
+                                        f"\n[Voir sur la carte]({carte(ln)})"),
+                        "color": 0x2ECC71 if gros else 0x9B59B6,
+                        "fields": [
+                            champ("Propriétaire", esc(ln.get("owner") or "inconnu")),
+                            champ("Monde", ln["world"].capitalize()),
+                            champ("Distance", f"{nb(d)} blocs" if d else "autre monde"),
+                            champ("Coordonnées", f"`{ln['x']} / {ln['z']}`", False),
+                        ],
+                        "timestamp": now.isoformat(),
+                        "footer": {"text": "\U0001F7E2 Reste du bâti, ça vaut le détour"
+                                           if gros else "\u26AA Petite construction"},
+                    }
+                    if ln.get("owner"):
+                        e["thumbnail"] = {"url": tete(ln["owner"])}
+                    if membres:
+                        liste = ", ".join(esc(m) for m in membres[:5])
+                        if len(membres) > 5:
+                            liste += f" +{len(membres) - 5}"
+                        e["fields"].append(champ(f"Membres restants ({len(membres)})", liste, False))
+                        e["fields"].append(champ(
+                            "À faire", "Tape `/l player` sur chaque membre : le dernier valide "
+                                       "tient le land, sa date de chute est celle du land.", False))
+                    alertes.append(e)
 
             state["lands"] = lands_new
             print(f"  lands : {len(lands_new)} | {len(tombes)} tombes | "
