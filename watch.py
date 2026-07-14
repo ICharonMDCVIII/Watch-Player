@@ -12,7 +12,7 @@ les POLL_SECONDS. Le cron GitHub etant peu fiable (des heures de trou entre
 deux runs), c'est la boucle qui assure la couverture, pas le cron.
 """
 
-import json, os, re, html, time, math, urllib.request, urllib.error, urllib.parse
+import json, os, re, html, time, math, subprocess, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -185,6 +185,31 @@ def envoyer(embeds):
         time.sleep(1)
 
 
+
+def sauver(state, msg="state"):
+    """Ecrit le state sur le disque ET le pousse sur GitHub tout de suite.
+    Sans ca, un run qui plante perd tout et le suivant re-annonce les memes chutes."""
+    STATE.parent.mkdir(exist_ok=True)
+    STATE.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    try:
+        run = lambda *a: subprocess.run(a, capture_output=True, timeout=90)
+        run("git", "config", "user.name", "badlands-watch")
+        run("git", "config", "user.email", "bot@users.noreply.github.com")
+        run("git", "add", "data/state.json")
+        if subprocess.run(["git", "diff", "--quiet", "--cached"]).returncode == 0:
+            return                      # rien de neuf
+        run("git", "commit", "-m", msg)
+        run("git", "pull", "--rebase", "--autostash", "origin",
+            os.environ.get("GITHUB_REF_NAME", "main"))
+        p = run("git", "push")
+        if p.returncode:
+            print("  !! push refuse :", p.stderr.decode()[:150], flush=True)
+    except Exception as e:
+        print("  !! git :", e, flush=True)
+
+
 # ------------------------------------------------------------------ CYCLE
 def cycle(state):
     """Un passage complet : qui est en ligne, les lands ont-ils bouge, alertes."""
@@ -308,14 +333,14 @@ def cycle(state):
                 l["owner_lands"] = compte.get(l.get("owner"), 0)
 
             state["last_markers"] = time.time()
-            tombes   = [lands_old[i] for i in lands_old if i not in lands_new]
-            nouveaux = [lands_new[i] for i in lands_new if i not in lands_old]
+            tombes   = [(i, lands_old[i]) for i in lands_old if i not in lands_new]
+            nouveaux = [(i, lands_new[i]) for i in lands_new if i not in lands_old]
 
             if len(tombes) > 200:
                 print(f"  !! {len(tombes)} disparitions d'un coup : anormal, on ignore", flush=True)
                 tombes = []
 
-            for l in sorted(tombes, key=lambda x: -x["chunks"]):
+            for lid, l in sorted(tombes, key=lambda x: -x[1]["chunks"]):
                 note, phrase = verdict(l, players, debut, now)
                 pastille, couleur, etiquette = NOTES[note]
                 d = dist(l)
@@ -333,6 +358,7 @@ def cycle(state):
                     ],
                     "timestamp": now.isoformat(),
                     "footer": {"text": f"{pastille} {etiquette}"},
+                    "_id": f"chute:{lid}",
                 }
                 if l.get("owner"):
                     e["thumbnail"] = {"url": tete(l["owner"])}
@@ -347,7 +373,7 @@ def cycle(state):
                 alertes.append(e)
 
             if NEW_LAND_ALERTS:
-                for l in nouveaux[:5]:
+                for lid, l in nouveaux[:5]:
                     alertes.append({
                         "title": f"\U0001F195  {l['name']}",
                         "description": f"Nouveau land \u00b7 [Voir sur la carte]({carte(l)})",
@@ -358,6 +384,7 @@ def cycle(state):
                             champ("Coordonnées", f"`{l['x']} / {l['z']}`"),
                         ],
                         "timestamp": now.isoformat(),
+                        "_id": f"neuf:{lid}",
                     })
 
             # retrecissement : le plugin rase les chunks vides, garde le bati
@@ -384,6 +411,7 @@ def cycle(state):
                         "timestamp": now.isoformat(),
                         "footer": {"text": "\U0001F7E2 Reste du bâti, ça vaut le détour"
                                            if gros else "\u26AA Petite construction"},
+                        "_id": f"rase:{lid}:{ln['chunks']}",
                     }
                     if ln.get("owner"):
                         e["thumbnail"] = {"url": tete(ln["owner"])}
@@ -401,9 +429,22 @@ def cycle(state):
             print(f"  lands : {len(lands_new)} | {len(tombes)} tombes | "
                   f"{len(nouveaux)} nouveaux", flush=True)
 
-    if alertes:
-        print(f"  -> {len(alertes)} alerte(s) envoyee(s)", flush=True)
-        envoyer(alertes)
+    # garde-fou : meme si un commit foire, on ne redit jamais deux fois la meme chose
+    deja = state.setdefault("annonces", [])
+    a_envoyer = []
+    for a in alertes:
+        cle = a.pop("_id", None)
+        if cle and cle in deja:
+            continue                      # deja annonce, on saute
+        if cle:
+            deja.append(cle)
+        a_envoyer.append(a)
+    del deja[:-1000]                      # on garde les 1000 dernieres
+
+    if a_envoyer:
+        print(f"  -> {len(a_envoyer)} alerte(s)", flush=True)
+        envoyer(a_envoyer)
+        sauver(state, f"alertes {now:%d/%m %H:%M}")   # on grave immediatement
 
 
 # ------------------------------------------------------------------ MAIN
@@ -426,14 +467,17 @@ def main():
         except Exception as e:
             print(f"  !! erreur dans le cycle : {e}", flush=True)
 
-        # on sauve a chaque tour : si le run est coupe, rien n'est perdu
+        # sur le disque a chaque tour, sur GitHub toutes les 20 min
         STATE.parent.mkdir(exist_ok=True)
         STATE.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+        if tours % max(1, 1200 // POLL_SECONDS) == 0:
+            sauver(state, f"state {datetime.now(timezone.utc):%d/%m %H:%M}")
 
         if time.time() + POLL_SECONDS >= fin:
             break
         time.sleep(POLL_SECONDS)
 
+    sauver(state, f"state {datetime.now(timezone.utc):%d/%m %H:%M}")
     print(f"\n{tours} releve(s) sur ce run.", flush=True)
 
 
