@@ -2,7 +2,7 @@ name: Rappel Vote
 
 on:
   schedule:
-    - cron: '0,30 7-23 * * *'
+    - cron: '0,15,30,45 * * * *'
   workflow_dispatch:
 
 jobs:
