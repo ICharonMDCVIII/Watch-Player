@@ -1,0 +1,20 @@
+name: Rappel Vote
+
+on:
+  schedule:
+    - cron: '0,30 7-23 * * *'   # 07h-23h UTC = couvre 9h30-00h30 Paris, été comme hiver
+  workflow_dispatch:            # bouton "Run workflow" pour tester à la main
+
+jobs:
+  rappel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Envoyer le rappel si créneau
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ vars.DISCORD_USER_ID }}
+        run: python vote_reminder.py
