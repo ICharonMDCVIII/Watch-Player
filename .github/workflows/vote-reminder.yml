@@ -15,6 +15,6 @@ jobs:
           python-version: '3.12'
       - name: Envoyer le rappel si créneau
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+           DISCORD_WEBHOOK_URL: ${{ secrets.VOTE_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ vars.DISCORD_USER_ID }}
         run: python vote_reminder.py
