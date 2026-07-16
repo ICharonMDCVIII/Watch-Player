@@ -106,11 +106,17 @@ def verdict(land, players, debut, now):
 
     riche = land.get("owner_lands", 0) >= 5 or land.get("balance", 0) >= 500000
 
+    # bonus : un membre untrust recemment nous dit que le land perd ses gens
+    purges = [p for p in membres if players.get(p, {}).get("untrust")]
+
     if not vus:
         age = jours_depuis(debut, now) or 0
         if age < 20:
             return "?", (f"Aucun membre croisé, mais je ne surveille que depuis {age:.0f} jour(s). "
                          f"Trop tôt pour juger.")
+        if purges:
+            return "++", (f"{len(purges)} membre(s) viennent d'être retirés du land pour "
+                          f"inactivité : le land se vide, il finira par tomber.")
         if age >= 90:
             return "+++", (f"Aucun membre croisé en {age:.0f} jours de surveillance. "
                            f"Palier long (180 j ou 1 an) → des joueurs installés.")
@@ -306,7 +312,12 @@ def cycle(state):
                 alertes.append(e)
 
     # --- 3. les lands ont-ils bouge ?
-    if time.time() - state.get("last_markers", 0) > MARKERS_EVERY:
+    dernier_scan = state.get("last_markers_iso")
+    besoin_scan = True
+    if dernier_scan:
+        ecoule = (now - datetime.fromisoformat(dernier_scan)).total_seconds()
+        besoin_scan = ecoule > MARKERS_EVERY
+    if besoin_scan:
         lands_new, ok = {}, True
         for w in WORLDS_LANDS:
             d = get(w, "markers")
@@ -332,7 +343,7 @@ def cycle(state):
             for l in lands_new.values():
                 l["owner_lands"] = compte.get(l.get("owner"), 0)
 
-            state["last_markers"] = time.time()
+            state["last_markers_iso"] = now.isoformat()
             tombes   = [(i, lands_old[i]) for i in lands_old if i not in lands_new]
             nouveaux = [(i, lands_new[i]) for i in lands_new if i not in lands_old]
 
@@ -424,6 +435,22 @@ def cycle(state):
                             "À faire", "Tape `/l player` sur chaque membre : le dernier valide "
                                        "tient le land, sa date de chute est celle du land.", False))
                     alertes.append(e)
+
+            # membre disparu d'un land = untrust automatique pour inactivite.
+            # ca nous apprend le palier d'un joueur SANS l'avoir croise en ligne.
+            for lid, ln in lands_new.items():
+                lo = lands_old.get(lid)
+                if not lo:
+                    continue
+                avant = set(lo.get("players") or [])
+                apres = set(ln.get("players") or [])
+                partis = avant - apres
+                for p in partis:
+                    # on note quand il a ete purge : ca borne son inactivite
+                    fiche = players.setdefault(p, {})
+                    fiche.setdefault("first_seen", now.isoformat())
+                    fiche["untrust"] = now.isoformat()
+                    fiche["untrust_land"] = ln.get("name")
 
             state["lands"] = lands_new
             print(f"  lands : {len(lands_new)} | {len(tombes)} tombes | "
