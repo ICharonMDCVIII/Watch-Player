@@ -22,10 +22,9 @@ SLOTS = {
     (21, 30): True,
     (23, 0): False,
     (0, 30): True,
-    (0, 52): True,
 }
 
-TOLERANCE_MIN = 15   # fenêtre après le créneau pour absorber le retard du cron
+TOLERANCE_MIN = 20   # fenêtre après le créneau pour absorber le retard du cron
 
 # Optionnel : colle tes liens de vote (clic direct dans Discord)
 LINK_90 = ""    # lien du vote 1h30
