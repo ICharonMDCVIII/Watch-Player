@@ -22,7 +22,7 @@ SLOTS = {
     (21, 30): True,
     (23, 0): False,
     (0, 30): True,
-    (0, 40): True,
+    (0, 40): False,
 }
 
 TOLERANCE_MIN = 15   # fenêtre après le créneau pour absorber le retard du cron
