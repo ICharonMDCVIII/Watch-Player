@@ -1,6 +1,6 @@
-# Badlands Watch
+# Land Watch
 
-Surveille les ~1750 lands du serveur Badlands (3 mondes) et prévient sur Discord
+Surveille les ~1750 lands du serveur (3 mondes) et prévient sur Discord
 dès qu'un land tombe ou se fait ronger.
 
 Aucune connexion au serveur Minecraft, aucun mod, aucun compte alt : le bot lit
@@ -14,7 +14,7 @@ Le tout tourne gratuitement sur GitHub Actions, 24h/24. Le PC peut être éteint
 ## Ce qu'il fait
 
 **En continu (toutes les ~2 min)** — il regarde qui est en ligne sur les 4 mondes
-(mojave, sierra, nevada, spawn) et note la date de dernière connexion de chacun.
+(les différents mondes) et note la date de dernière connexion de chacun.
 Au fil des jours il se construit la liste de qui joue encore et qui a disparu.
 
 **Toutes les heures** — il compare la liste des lands à celle d'avant, et réagit à
@@ -78,7 +78,7 @@ cassée, il faut relancer à la main (Actions → Run workflow).
 Tout est en haut de `watch.py` :
 
 ```python
-HOME_WORLD, HOME_X, HOME_Z = "mojave", 423, -7027   # ta base, pour la distance
+HOME_WORLD, HOME_X, HOME_Z = "monde", 0, 0   # ta base, pour la distance
 MARKERS_EVERY = 3600      # 1h entre 2 scans des lands (le gros fichier)
 NEW_LAND_ALERTS = False   # True = te prévenir aussi des lands créés
 ```
