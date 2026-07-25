@@ -335,6 +335,19 @@ def cycle(state):
                             z=round(pos.get("z", 0)), zones=1)
                 lands_new[lid] = info
 
+        # --- GARDE-FOU PANNE RESEAU ---
+        # Si la BlueMap se vide (nettoyage, redemarrage), le scan revient quasi
+        # vide et le bot croirait que tout est tombe. On compare au dernier scan
+        # SAIN : si on a perdu plus de 30% des lands d'un coup, c'est une panne,
+        # pas une vague de declaims. On jette le scan entier sans rien changer.
+        n_avant = len(lands_old)
+        n_apres = len(lands_new)
+        if ok and n_avant >= 50 and n_apres < n_avant * 0.7:
+            print(f"  !! scan anormal : {n_avant} -> {n_apres} lands "
+                  f"(-{n_avant - n_apres}). Panne BlueMap probable, scan ignore, "
+                  f"on ne touche a rien.", flush=True)
+            ok = False   # on abandonne ce cycle de lands, l'etat reste intact
+
         if ok and lands_new:
             compte = {}
             for l in lands_new.values():
@@ -347,8 +360,13 @@ def cycle(state):
             tombes   = [(i, lands_old[i]) for i in lands_old if i not in lands_new]
             nouveaux = [(i, lands_new[i]) for i in lands_new if i not in lands_old]
 
-            if len(tombes) > 200:
-                print(f"  !! {len(tombes)} disparitions d'un coup : anormal, on ignore", flush=True)
+            # VERROU 2 (secours) : meme sous le seuil, si on voit une chute massive
+            # d'un coup (>60 lands), c'est suspect -> on n'annonce pas ces chutes,
+            # mais on met quand meme l'etat a jour (elles sont probablement reelles
+            # mais on evite un spam si jamais).
+            if len(tombes) > 60:
+                print(f"  !! {len(tombes)} disparitions d'un coup : suspect, "
+                      f"chutes non annoncees ce cycle", flush=True)
                 tombes = []
 
             for lid, l in sorted(tombes, key=lambda x: -x[1]["chunks"]):
